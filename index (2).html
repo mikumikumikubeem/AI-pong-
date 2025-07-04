@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Simple Pong Game - AI & Online</title>
+  <style>
+    canvas {
+      background: #000;
+      display: block;
+      margin: 40px auto;
+      border: 2px solid #fff;
+    }
+    body {
+      background: #222;
+      color: #fff;
+      font-family: sans-serif;
+      text-align: center;
+    }
+    #mode-select {
+      margin-top: 20px;
+      padding: 8px 14px;
+      font-size: 16px;
+      border-radius: 5px;
+      border: none;
+      background: #fff;
+      color: #222;
+      font-weight: bold;
+      outline: none;
+    }
+    #online-status {
+      font-size: 15px;
+      margin: 8px;
+      color: #80ffe0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Simple Pong Game</h1>
+  <select id="mode-select">
+    <option value="pvp">Player vs Player</option>
+    <option value="ai">Player vs AI</option>
+    <option value="online">Online Multiplayer (Beta)</option>
+  </select>
+  <div id="online-status"></div>
+  <canvas id="pong" width="600" height="400"></canvas>
+  <p id="instructions"></p>
+  <script>
+    const canvas = document.getElementById('pong');
+    const ctx = canvas.getContext('2d');
+    const modeSelect = document.getElementById('mode-select');
+    const onlineStatus = document.getElementById('online-status');
+    const instructions = document.getElementById('instructions');
+
+    // Game variables
+    const paddleWidth = 10, paddleHeight = 80;
+    let leftPaddleY = (canvas.height - paddleHeight) / 2;
+    let rightPaddleY = (canvas.height - paddleHeight) / 2;
+    const paddleSpeed = 5;
+
+    let ballX = canvas.width / 2, ballY = canvas.height / 2;
+    let ballRadius = 8;
+    let ballSpeedX = 4, ballSpeedY = 4;
+
+    let leftScore = 0, rightScore = 0;
+
+    let keys = {};
+    document.addEventListener('keydown', e => keys[e.key] = true);
+    document.addEventListener('keyup', e => keys[e.key] = false);
+
+    // Modes: 'pvp', 'ai', 'online'
+    let mode = 'pvp';
+    let isOnlinePlayer1 = false; // true: left paddle, false: right paddle
+    let ws = null;
+    let onlineReady = false;
+    let onlineSide = null; // 'left' or 'right'
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Middle line
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(canvas.width / 2, 0);
+      ctx.lineTo(canvas.width / 2, canvas.height);
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Left paddle
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(10, leftPaddleY, paddleWidth, paddleHeight);
+
+      // Right paddle
+      ctx.fillRect(canvas.width - 10 - paddleWidth, rightPaddleY, paddleWidth, paddleHeight);
+
+      // Ball
+      ctx.beginPath();
+      ctx.arc(ballX, ballY, ballRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Scores
+      ctx.font = "30px Arial";
+      ctx.fillText(leftScore, canvas.width / 4, 40);
+      ctx.fillText(rightScore, 3 * canvas.width / 4, 40);
+    }
+
+    function movePaddles() {
+      if (mode === 'pvp' || (mode === 'online' && onlineSide === 'left')) {
+        if (keys['w'] && leftPaddleY > 0) leftPaddleY -= paddleSpeed;
+        if (keys['s'] && leftPaddleY < canvas.height - paddleHeight) leftPaddleY += paddleSpeed;
+      }
+      if (mode === 'pvp' || (mode === 'online' && onlineSide === 'right')) {
+        if (keys['ArrowUp'] && rightPaddleY > 0) rightPaddleY -= paddleSpeed;
+        if (keys['ArrowDown'] && rightPaddleY < canvas.height - paddleHeight) rightPaddleY += paddleSpeed;
+      }
+      if (mode === 'ai') {
+        // AI for right paddle
+        const target = ballY - (paddleHeight / 2);
+        if (rightPaddleY + paddleHeight / 2 < ballY - 5) rightPaddleY += paddleSpeed * 0.8;
+        else if (rightPaddleY + paddleHeight / 2 > ballY + 5) rightPaddleY -= paddleSpeed * 0.8;
+        rightPaddleY = Math.max(0, Math.min(canvas.height - paddleHeight, rightPaddleY));
+      }
+    }
+
+    function moveBall() {
+      ballX += ballSpeedX;
+      ballY += ballSpeedY;
+
+      // Top/bottom collisions
+      if (ballY - ballRadius < 0 || ballY + ballRadius > canvas.height) {
+        ballSpeedY = -ballSpeedY;
+      }
+
+      // Left paddle collision
+      if (
+        ballX - ballRadius < 20 + paddleWidth &&
+        ballY > leftPaddleY &&
+        ballY < leftPaddleY + paddleHeight
+      ) {
+        ballSpeedX = -ballSpeedX;
+        ballX = 20 + paddleWidth + ballRadius; // Prevent sticking
+      }
+
+      // Right paddle collision
+      if (
+        ballX + ballRadius > canvas.width - 20 - paddleWidth &&
+        ballY > rightPaddleY &&
+        ballY < rightPaddleY + paddleHeight
+      ) {
+        ballSpeedX = -ballSpeedX;
+        ballX = canvas.width - 20 - paddleWidth - ballRadius;
+      }
+
+      // Score!
+      if (ballX - ballRadius < 0) {
+        rightScore++;
+        resetBall();
+      }
+      if (ballX + ballRadius > canvas.width) {
+        leftScore++;
+        resetBall();
+      }
+    }
+
+    function resetBall() {
+      ballX = canvas.width / 2;
+      ballY = canvas.height / 2;
+      ballSpeedX = -ballSpeedX;
+      ballSpeedY = 4 * (Math.random() > 0.5 ? 1 : -1);
+      // Online mode: sync ball position to both players
+      if (mode === 'online' && onlineReady) {
+        sendGameState();
+      }
+    }
+
+    function sendGameState() {
+      if (ws && onlineReady && mode === 'online') {
+        const state = {
+          leftPaddleY, rightPaddleY, ballX, ballY, leftScore, rightScore, ballSpeedX, ballSpeedY
+        };
+        ws.send(JSON.stringify({ type: 'state', state }));
+      }
+    }
+
+    function setGameState(state) {
+      leftPaddleY = state.leftPaddleY;
+      rightPaddleY = state.rightPaddleY;
+      ballX = state.ballX;
+      ballY = state.ballY;
+      leftScore = state.leftScore;
+      rightScore = state.rightScore;
+      ballSpeedX = state.ballSpeedX;
+      ballSpeedY = state.ballSpeedY;
+    }
+
+    function gameLoop() {
+      if (mode === 'online') {
+        if (onlineReady && onlineSide === 'left') {
+          // Only left player moves the ball
+          movePaddles();
+          moveBall();
+          sendGameState();
+        } else if (onlineReady && onlineSide === 'right') {
+          movePaddles();
+        }
+        // Right player receives state from server, just draws
+      } else {
+        movePaddles();
+        moveBall();
+      }
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+
+    // --- Online mode logic ---
+    function setupWebSocket() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      ws = new WebSocket('ws://localhost:3000');
+      onlineStatus.textContent = 'Connecting...';
+      ws.onopen = () => {};
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'side') {
+          // Assigned left or right
+          onlineSide = msg.side;
+          onlineStatus.textContent = `Connected! You are Player ${onlineSide === 'left' ? '1 (W/S)' : '2 (↑/↓)'}. Waiting for opponent...`;
+        }
+        if (msg.type === 'ready') {
+          onlineReady = true;
+          instructions.textContent = `You are Player ${onlineSide === 'left' ? '1 (W/S)' : '2 (↑/↓)'}!`;
+          onlineStatus.textContent = 'Both players connected! Game on!';
+          // Reset game state
+          leftPaddleY = (canvas.height - paddleHeight) / 2;
+          rightPaddleY = (canvas.height - paddleHeight) / 2;
+          leftScore = 0; rightScore = 0;
+          ballX = canvas.width / 2;
+          ballY = canvas.height / 2;
+          ballSpeedX = 4; ballSpeedY = 4;
+        }
+        if (msg.type === 'state' && onlineSide === 'right') {
+          setGameState(msg.state);
+        }
+      };
+      ws.onclose = () => {
+        onlineStatus.textContent = 'Disconnected from server.';
+        onlineReady = false;
+        onlineSide = null;
+      };
+      ws.onerror = () => {
+        onlineStatus.textContent = 'Failed to connect. Is the server running?';
+        onlineReady = false;
+      };
+    }
+
+    // UI Mode Selection
+    modeSelect.addEventListener('change', () => {
+      mode = modeSelect.value;
+      keys = {};
+      leftPaddleY = (canvas.height - paddleHeight) / 2;
+      rightPaddleY = (canvas.height - paddleHeight) / 2;
+      leftScore = 0; rightScore = 0;
+      ballX = canvas.width / 2; ballY = canvas.height / 2;
+      ballSpeedX = 4; ballSpeedY = 4;
+      instructions.textContent = '';
+      if (mode === 'pvp') {
+        onlineStatus.textContent = '';
+        instructions.textContent = 'Player 1: W/S | Player 2: ↑/↓';
+      }
+      if (mode === 'ai') {
+        onlineStatus.textContent = '';
+        instructions.textContent = 'You: W/S | AI: Right Paddle';
+      }
+      if (mode === 'online') {
+        setupWebSocket();
+        instructions.textContent = 'Connecting to online server...';
+      }
+    });
+
+    // Init
+    instructions.textContent = 'Player 1: W/S | Player 2: ↑/↓';
+    gameLoop();
+  </script>
+</body>
+</html>
